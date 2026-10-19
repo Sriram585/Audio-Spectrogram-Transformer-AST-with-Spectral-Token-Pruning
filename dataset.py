@@ -28,7 +28,7 @@ def download_esc50(data_dir="data"):
 class ESC50SpectrogramDataset(Dataset):
     """
     Loads 5-second .wav clips, resamples to 16kHz, and converts 1D waveforms
-    into normalized 2D Log-Mel Spectrograms of shape [1, 64, 200].
+    into normalized 2D Log-Mel Spectrograms of shape [1, 64, 200] in float32.
     """
     def __init__(self, root_dir, folds=(1, 2, 3, 4), esc10_only=True):
         meta_path = os.path.join(root_dir, "meta", "esc50.csv")
@@ -58,13 +58,18 @@ class ESC50SpectrogramDataset(Dataset):
         wav_path = os.path.join(self.audio_dir, row["filename"])
         sr, data = wav.read(wav_path)
 
-        # Convert int16 PCM to float32 [-1.0, 1.0]
-        if data.dtype != np.float32:
-            data = data.astype(np.float32) / (np.max(np.abs(data)) + 1e-6)
+        # If stereo, average to mono
+        if data.ndim > 1:
+            data = data.mean(axis=1)
 
-        waveform = torch.from_numpy(data).unsqueeze(0)  # [1, Samples]
+        # Strictly cast to torch.float32 to match torchaudio Mel filterbanks
+        waveform = torch.tensor(data, dtype=torch.float32)
+        max_val = torch.max(torch.abs(waveform))
+        if max_val > 0:
+            waveform = waveform / max_val
+        waveform = waveform.unsqueeze(0)  # [1, Samples]
 
-        # Fast downsample from 44.1kHz to ~16kHz (take every 3rd sample -> ~14.7kHz, pad/crop to 80,000 samples)
+        # Fast downsample from 44.1kHz to ~16kHz
         if sr > 16000:
             step = max(1, int(round(sr / 16000)))
             waveform = waveform[:, ::step]
@@ -75,11 +80,11 @@ class ESC50SpectrogramDataset(Dataset):
         else:
             waveform = waveform[:, :target_len]
 
-        # Convert to 2D Log-Mel Spectrogram: [1, 64, 201] -> crop to [1, 64, 200]
+        # Convert to 2D Log-Mel Spectrogram: [1, 64, 200] in float32
         spec = self.amp_to_db(self.mel_spec(waveform))[:, :, :200]
 
         # Instance-level spectral subtraction (cancels steady background hum)
         spec = (spec - spec.mean(dim=-1, keepdim=True)) / (spec.std() + 1e-6)
 
         label = self.label_map[row["category"]]
-        return spec, torch.tensor(label, dtype=torch.long)
+        return spec.to(torch.float32), torch.tensor(label, dtype=torch.long)
